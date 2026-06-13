@@ -189,16 +189,32 @@ func newSessionCmd(a *App) *cobra.Command {
 
 // ---- crawl ----
 
-// newCrawlCmd walks outward from seed notes or users, writing connected records
-// as JSONL (one file per record kind) into an output directory.
+// crawlNode is one entry in the breadth-first frontier: a note to fetch and the
+// hop distance from a seed.
+type crawlNode struct {
+	id    string
+	token string
+	depth int
+}
+
+// newCrawlCmd is the scraping engine. It seeds a frontier from the explore feed
+// and from any note ids passed in, then walks outward breadth-first: each note
+// can reach its author, the author's other notes, and its related notes. Every
+// record kind streams to its own JSONL file as it is found, so a long crawl
+// leaves usable output even if it is interrupted. Notes and users are
+// de-duplicated, and depth and max bound the walk.
 func newCrawlCmd(a *App) *cobra.Command {
-	var outDir, token string
-	var withComments, withRelated, withUser, deep bool
+	var outDir, token, category string
+	var explore, withComments, withRelated, withAuthorNotes, withUser, deep bool
+	var depth, maxNotes, seedLimit int
 	cmd := &cobra.Command{
-		Use:     "crawl <id|url>...",
-		Short:   "Crawl connected records from seed notes into JSONL files",
-		Args:    cobra.MinimumNArgs(1),
-		Example: "  xhs crawl <note-id> --token <t> --out ./data --comments\n  xhs search coffee -o url | xhs crawl - --out ./data",
+		Use:   "crawl [id|url]...",
+		Short: "Crawl connected records into JSONL files, seeding from explore or note ids",
+		Args:  cobra.ArbitraryArgs,
+		Example: "  xhs crawl --explore --depth 2 --max 500 --out ./data\n" +
+			"  xhs crawl --category food --author-notes --out ./food\n" +
+			"  xhs crawl <note-id> --token <t> --related --comments --out ./data\n" +
+			"  xhs search coffee -o url | xhs crawl - --out ./data",
 		RunE: func(_ *cobra.Command, args []string) error {
 			if outDir == "" {
 				outDir = "."
@@ -208,6 +224,9 @@ func newCrawlCmd(a *App) *cobra.Command {
 			}
 			c := a.Client()
 			seeds := readArgsOrStdin(args)
+			if !explore && category == "" && len(seeds) == 0 {
+				return fmt.Errorf("nothing to crawl: pass note ids or use --explore / --category")
+			}
 
 			nw := newJSONLWriter(filepath.Join(outDir, "notes.jsonl"))
 			defer func() { _ = nw.Close() }()
@@ -216,53 +235,108 @@ func newCrawlCmd(a *App) *cobra.Command {
 			cw := newJSONLWriter(filepath.Join(outDir, "comments.jsonl"))
 			defer func() { _ = cw.Close() }()
 
+			seenNote := map[string]bool{}
 			seenUser := map[string]bool{}
+			var frontier []crawlNode
+			enqueue := func(id, tok string, d int) {
+				if id == "" || seenNote[id] {
+					return
+				}
+				seenNote[id] = true
+				frontier = append(frontier, crawlNode{id: id, token: tok, depth: d})
+			}
+
+			// Seed from the explore feed. Each fetch is reshuffled, so this pulls
+			// a wide, fresh starting set without a cookie.
+			if explore || category != "" {
+				cat := firstNonEmpty(category, "recommend")
+				seeded := 0
+				for fi, err := range c.Feed(a.ctx(), cat, seedLimit) {
+					if err != nil {
+						a.progress("seed explore/%s: %v", cat, err)
+						break
+					}
+					enqueue(fi.NoteID, fi.XsecToken, 0)
+					seeded++
+				}
+				a.progress("seeded %d notes from explore/%s", seeded, cat)
+			}
 			for _, seed := range seeds {
 				ref := xhsurl.Parse(seed)
-				tok := firstNonEmpty(token, ref.XsecToken)
-				n, err := c.Note(a.ctx(), ref.NoteID, tok)
+				enqueue(ref.NoteID, firstNonEmpty(token, ref.XsecToken), 0)
+			}
+
+			processed := 0
+			for len(frontier) > 0 {
+				if maxNotes > 0 && processed >= maxNotes {
+					a.progress("reached --max %d, stopping", maxNotes)
+					break
+				}
+				cur := frontier[0]
+				frontier = frontier[1:]
+
+				n, err := c.Note(a.ctx(), cur.id, cur.token)
 				if err != nil {
-					a.progress("skip %s: %v", ref.NoteID, err)
+					a.progress("skip note %s: %v", cur.id, err)
 					continue
 				}
 				nw.Write(n)
-				a.progress("note %s %q", n.NoteID, n.Title)
+				processed++
+				a.progress("note %s %q (depth %d, %d done, %d queued)", n.NoteID, n.Title, cur.depth, processed, len(frontier))
 
 				if withUser && n.UserID != "" && !seenUser[n.UserID] {
 					seenUser[n.UserID] = true
 					if u, err := c.User(a.ctx(), n.UserID); err == nil {
 						uw.Write(u)
+					} else {
+						a.progress("skip user %s: %v", n.UserID, err)
+					}
+					if withAuthorNotes && cur.depth < depth {
+						for fi, err := range c.UserNotes(a.ctx(), n.UserID, a.limit) {
+							if err != nil {
+								break
+							}
+							enqueue(fi.NoteID, fi.XsecToken, cur.depth+1)
+						}
 					}
 				}
-				if withRelated {
-					if rel, err := c.Related(a.ctx(), n.NoteID, tok, a.limit); err == nil {
+				if withRelated && cur.depth < depth {
+					if rel, err := c.Related(a.ctx(), n.NoteID, cur.token, a.limit); err == nil {
 						for _, r := range rel {
-							nw.Write(r)
+							enqueue(r.NoteID, r.XsecToken, cur.depth+1)
 						}
 					}
 				}
 				if withComments {
 					cnt := 0
-					for cm, err := range c.Comments(a.ctx(), n.NoteID, tok, deep, a.limit) {
+					for cm, err := range c.Comments(a.ctx(), n.NoteID, cur.token, deep, a.limit) {
 						if err != nil {
 							break
 						}
 						cw.Write(cm)
 						cnt++
 					}
-					a.progress("  %d comments", cnt)
+					if cnt > 0 {
+						a.progress("  %d comments", cnt)
+					}
 				}
 			}
-			a.progress("wrote records to %s", outDir)
+			a.progress("crawl done: %d notes, %d users into %s", processed, len(seenUser), outDir)
 			return nil
 		},
 	}
 	f := cmd.Flags()
 	f.StringVar(&outDir, "out", ".", "output directory for JSONL files")
 	f.StringVar(&token, "token", "", "xsec_token shared by the seed notes")
+	f.BoolVar(&explore, "explore", false, "seed the frontier from the explore feed")
+	f.StringVar(&category, "category", "", "seed from a named explore category (implies --explore)")
+	f.IntVar(&seedLimit, "seed-limit", 30, "how many explore notes to seed with")
+	f.IntVar(&depth, "depth", 1, "how many hops to follow related and author notes")
+	f.IntVar(&maxNotes, "max", 0, "stop after this many notes (0 means no cap)")
 	f.BoolVar(&withComments, "comments", false, "also crawl comments")
 	f.BoolVar(&deep, "deep", false, "include comment replies when crawling comments")
-	f.BoolVar(&withRelated, "related", true, "also crawl related notes")
+	f.BoolVar(&withRelated, "related", true, "follow related notes into the frontier")
+	f.BoolVar(&withAuthorNotes, "author-notes", false, "follow each author's other notes into the frontier")
 	f.BoolVar(&withUser, "user", true, "also crawl the note author profile")
 	return cmd
 }
