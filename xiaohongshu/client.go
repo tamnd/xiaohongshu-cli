@@ -54,8 +54,12 @@ func NewClient(cfg Config) *Client {
 		}
 	}
 	c := &Client{
-		cfg:     cfg,
-		hc:      &http.Client{Timeout: cfg.Timeout, Transport: tr},
+		cfg: cfg,
+		hc: &http.Client{
+			Timeout:       cfg.Timeout,
+			Transport:     tr,
+			CheckRedirect: stopAtLogin,
+		},
 		signer:  xhssign.New(),
 		nowFn:   time.Now,
 		cookies: map[string]string{},
@@ -65,6 +69,23 @@ func NewClient(cfg Config) *Client {
 	}
 	c.applyCookies()
 	return c
+}
+
+// errLoginWall marks a redirect to the login page, which XHS issues when a
+// server-rendered surface needs a cookie or when the caller's IP is being
+// rate-limited. webAttempt turns it into a typed access error.
+const errLoginWall = "redirected to login"
+
+// stopAtLogin stops the HTTP client from following a redirect to the login page
+// so the caller sees the wall instead of a rendered login form with no data.
+func stopAtLogin(req *http.Request, _ []*http.Request) error {
+	if strings.Contains(req.URL.Path, "/login") {
+		return fmt.Errorf("%s: %s", errLoginWall, req.URL)
+	}
+	if len(req.URL.RawQuery) > 0 && strings.Contains(req.URL.RawQuery, "redirectPath") {
+		return fmt.Errorf("%s: %s", errLoginWall, req.URL)
+	}
+	return nil
 }
 
 func (c *Client) now() time.Time { return c.nowFn() }
@@ -204,11 +225,6 @@ func (c *Client) Raw(ctx context.Context, method, uri string, params map[string]
 func (c *Client) do(ctx context.Context, method, uri string, params map[string]string, body string) ([]byte, error) {
 	full := Host + uri
 	cacheKey := method + " " + xhssign.ContentString(method, uri, params, body)
-	if c.cache != nil && !c.cfg.DryRun {
-		if b, ok := c.cache.get(cacheKey); ok {
-			return b, nil
-		}
-	}
 	if c.cfg.DryRun {
 		q := ""
 		if len(params) > 0 {
@@ -217,11 +233,24 @@ func (c *Client) do(ctx context.Context, method, uri string, params map[string]s
 		_, _ = fmt.Fprintf(dryRunOut, "%s %s%s\n", method, full, q)
 		return dryRunBody, nil
 	}
+	return c.runWithRetry(ctx, cacheKey, true, func(ctx context.Context) ([]byte, error) {
+		return c.attempt(ctx, method, full, uri, params, body)
+	})
+}
 
+// runWithRetry runs attempt with the client's pacing and retry policy, reading
+// and writing the on-disk cache under cacheKey when useCache is set. It backs
+// off between tries and gives up after Retries attempts.
+func (c *Client) runWithRetry(ctx context.Context, cacheKey string, useCache bool, attempt func(context.Context) ([]byte, error)) ([]byte, error) {
+	if c.cache != nil && useCache {
+		if b, ok := c.cache.get(cacheKey); ok {
+			return b, nil
+		}
+	}
 	var last error
-	for attempt := 0; attempt <= c.cfg.Retries; attempt++ {
-		if attempt > 0 {
-			d := c.cfg.Rate * time.Duration(attempt*attempt+1)
+	for try := 0; try <= c.cfg.Retries; try++ {
+		if try > 0 {
+			d := c.cfg.Rate * time.Duration(try*try+1)
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
@@ -231,12 +260,19 @@ func (c *Client) do(ctx context.Context, method, uri string, params map[string]s
 		if err := c.throttle(ctx); err != nil {
 			return nil, err
 		}
-		b, err := c.attempt(ctx, method, full, uri, params, body)
+		b, err := attempt(ctx)
 		if err != nil {
+			// A typed API error is already classified (login wall, anti-bot,
+			// not found). Retrying it inside this short paced loop will not
+			// clear it, and wrapping it would lose its exit-code kind, so
+			// return it untouched.
+			if ae, ok := err.(*APIError); ok {
+				return nil, ae
+			}
 			last = err
 			continue
 		}
-		if c.cache != nil {
+		if c.cache != nil && useCache {
 			c.cache.put(cacheKey, b)
 		}
 		return b, nil
