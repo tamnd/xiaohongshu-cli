@@ -1,0 +1,173 @@
+# GoReleaser turns one tag push into everything a user might install from: raw
+# archives, Linux packages (deb, rpm, apk), a multi-arch container image, and
+# entries for the package managers (Homebrew, Scoop). `git tag vX.Y.Z && git
+# push --tags` fans out to all of them through .github/workflows/release.yml.
+#
+# Publish steps that push to a repository you do not own yet (the Homebrew tap,
+# the Scoop bucket) self-disable when their token is absent. A release with no
+# extra secrets still produces every downloadable artifact and the container
+# image; each manager lights up the moment its repository and token exist.
+version: 2
+
+project_name: xhs
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  - id: xhs
+    binary: xhs
+    main: ./cmd/xhs
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/tamnd/xiaohongshu-cli/cli.Version={{ .Version }}
+      - -X github.com/tamnd/xiaohongshu-cli/cli.Commit={{ .ShortCommit }}
+      - -X github.com/tamnd/xiaohongshu-cli/cli.Date={{ .CommitDate }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    targets:
+      - linux_amd64
+      - linux_arm64
+      - linux_arm_7
+      - linux_386
+      - darwin_amd64
+      - darwin_arm64
+      - windows_amd64
+      - windows_arm64
+      - freebsd_amd64
+      - freebsd_arm64
+
+archives:
+  - id: default
+    name_template: "xhs_{{ .Version }}_{{ .Os }}_{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}"
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - LICENSE
+      - README.md
+
+nfpms:
+  - id: linux-packages
+    package_name: xhs
+    file_name_template: "{{ .ConventionalFileName }}"
+    vendor: tamnd
+    homepage: https://github.com/tamnd/xiaohongshu-cli
+    maintainer: Duc-Tam Nguyen <tamnd87@gmail.com>
+    description: A command line for Xiaohongshu.
+    license: Apache-2.0
+    formats:
+      - deb
+      - rpm
+      - apk
+    bindir: /usr/bin
+    section: utils
+    contents:
+      - src: ./LICENSE
+        dst: /usr/share/doc/xhs/LICENSE
+
+dockers_v2:
+  - images:
+      - ghcr.io/tamnd/xhs
+    tags:
+      - "{{ .Version }}"
+      - latest
+    dockerfile: Dockerfile
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    labels:
+      org.opencontainers.image.title: "{{ .ProjectName }}"
+      org.opencontainers.image.description: "A command line for Xiaohongshu."
+      org.opencontainers.image.url: "https://github.com/tamnd/xiaohongshu-cli"
+      org.opencontainers.image.source: "https://github.com/tamnd/xiaohongshu-cli"
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.licenses: "Apache-2.0"
+
+homebrew_casks:
+  - name: xhs
+    repository:
+      owner: tamnd
+      name: homebrew-tap
+      token: '{{ envOrDefault "HOMEBREW_TAP_GITHUB_TOKEN" "" }}'
+    directory: Casks
+    homepage: https://github.com/tamnd/xiaohongshu-cli
+    description: A command line for Xiaohongshu.
+    skip_upload: '{{ if envOrDefault "HOMEBREW_TAP_GITHUB_TOKEN" "" }}false{{ else }}true{{ end }}'
+    commit_author:
+      name: Duc-Tam Nguyen
+      email: tamnd87@gmail.com
+
+scoops:
+  - repository:
+      owner: tamnd
+      name: scoop-bucket
+      token: '{{ envOrDefault "SCOOP_BUCKET_GITHUB_TOKEN" "" }}'
+    homepage: https://github.com/tamnd/xiaohongshu-cli
+    description: A command line for Xiaohongshu.
+    license: Apache-2.0
+    skip_upload: '{{ if envOrDefault "SCOOP_BUCKET_GITHUB_TOKEN" "" }}false{{ else }}true{{ end }}'
+    commit_author:
+      name: Duc-Tam Nguyen
+      email: tamnd87@gmail.com
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+sboms:
+  - id: archive
+    artifacts: archive
+
+signs:
+  - cmd: cosign
+    certificate: "${artifact}.pem"
+    args:
+      - sign-blob
+      - "--output-certificate=${certificate}"
+      - "--output-signature=${signature}"
+      - "${artifact}"
+      - "--yes"
+    artifacts: checksum
+    output: true
+
+docker_signs:
+  - cmd: cosign
+    artifacts: manifests
+    args:
+      - sign
+      - "${artifact}@${digest}"
+      - "--yes"
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^ci:"
+      - Merge pull request
+      - Merge branch
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\(.+\))??!?:.+$'
+      order: 0
+    - title: Fixes
+      regexp: '^.*?fix(\(.+\))??!?:.+$'
+      order: 1
+    - title: Other
+      order: 999
+
+release:
+  github:
+    owner: tamnd
+    name: xiaohongshu-cli
+  draft: false
+  prerelease: auto

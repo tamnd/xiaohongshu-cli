@@ -1,0 +1,11 @@
+/dist/
+/bin/
+*.out
+*.test
+.DS_Store
+
+# Built docs site (tago output) and its cache
+/docs/public/
+/docs/public-pages/
+/docs/public-cf/
+**/.tago-cache.db
