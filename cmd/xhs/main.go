@@ -1,4 +1,4 @@
-// Command xhs is a single-binary command line for xiaohongshu.
+// Command xhs is a single-binary command line for Xiaohongshu.
 package main
 
 import (
@@ -9,6 +9,7 @@ import (
 
 	"github.com/charmbracelet/fang"
 	"github.com/tamnd/xiaohongshu-cli/cli"
+	"github.com/tamnd/xiaohongshu-cli/xiaohongshu"
 )
 
 func main() {
@@ -16,12 +17,27 @@ func main() {
 	defer stop()
 
 	root := cli.Root()
-	// fang gives styled help, errors, and shell completion for free; the command
-	// tree and its exit-code mapping stay in the cli package.
 	if err := fang.Execute(ctx, root,
 		fang.WithVersion(cli.Version),
-		fang.WithNotifySignal(os.Interrupt, syscall.SIGTERM),
+		fang.WithCommit(cli.Commit),
 	); err != nil {
-		os.Exit(1)
+		os.Exit(exitCode(err))
+	}
+}
+
+// exitCode maps an error to a stable shell exit code so scripts can tell a not
+// found from an anti-bot wall from a transient network failure.
+func exitCode(err error) int {
+	switch xiaohongshu.Kind(err) {
+	case xiaohongshu.ErrNotFound:
+		return 4
+	case xiaohongshu.ErrAccess:
+		return 3
+	case xiaohongshu.ErrRate, xiaohongshu.ErrAntibot:
+		return 5
+	case xiaohongshu.ErrNetwork:
+		return 6
+	default:
+		return 1
 	}
 }
