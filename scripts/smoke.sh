@@ -8,11 +8,15 @@
 #   XHS=./bin/xhs ./scripts/smoke.sh
 #   XHS_COOKIE='web_session=...; a1=...' ./scripts/smoke.sh   # gated surfaces too
 #
-# Xiaohongshu blocks datacenter IP ranges and rate-limits every IP hard. From a
-# server or CI most calls come back as anti-bot rejections (461/406/300012 and
-# friends), and the personalized surfaces need a logged-in cookie. Those are
-# reported as SKIP, not FAIL, since they need a residential IP and a cookie
-# rather than a code fix.
+# The note and feed surfaces read the server-rendered page (__INITIAL_STATE__)
+# and work anonymously from any IP, so they are expected to PASS without a
+# cookie. The profile-derived surfaces (user, user-notes, related) also read the
+# server-rendered profile page, but Xiaohongshu rate-limits that page hard per
+# IP: a cold IP serves it, then it redirects to login for a cooldown window.
+# Those pass when the IP is cold and SKIP when it is hot. Comments and search are
+# only ever loaded over the signed JSON API, which refuses anonymous callers, so
+# they need a logged-in cookie and are reported as SKIP. None of the SKIPs are a
+# code fault: they need a residential IP or a cookie, not a code change.
 
 set -u
 
@@ -71,27 +75,45 @@ run cache-stat         -- cache stat -o jsonl
 run session-show       -- session show -o jsonl
 run version-json       -- version -o jsonl
 
-# --- live public surfaces (walled from datacenter IPs) ---
+# Harvest a real note, token, and author from the explore feed. The feed is read
+# from the server-rendered page, so this works anonymously and seeds the note,
+# related, and user checks with live ids and a fresh token.
+SEED="$("$XHS" feed -n 1 -o jsonl 2>/dev/null | head -1)"
+HNOTE="$(printf '%s' "$SEED" | sed -n 's/.*"note_id":"\([^"]*\)".*/\1/p')"
+HTOKEN="$(printf '%s' "$SEED" | sed -n 's/.*"xsec_token":"\([^"]*\)".*/\1/p')"
+HUSER="$(printf '%s' "$SEED" | sed -n 's/.*"user_id":"\([^"]*\)".*/\1/p')"
+HNOTE="${HNOTE:-$NOTE_ID}"
+HUSER="${HUSER:-$USER_ID}"
+
+# --- anonymous server-rendered surfaces (expected to pass without a cookie) ---
+run feed               -- feed --category food -n 3 -o jsonl
+if [ -n "$HTOKEN" ]; then
+  run note             -- note "$HNOTE" --token "$HTOKEN" -o jsonl
+else
+  printf 'SKIP  %-22s note  (no token harvested, IP walled)\n' "note"
+  skip=$((skip + 1))
+fi
+
+# --- profile-derived surfaces (anonymous on a cold IP, rate-walled when hot) ---
+run user               -- user "$HUSER" -o jsonl
+run user-notes         -- user "$HUSER" --notes -n 3 -o jsonl
+if [ -n "$HTOKEN" ]; then
+  run related          -- related "$HNOTE" --token "$HTOKEN" -n 3 -o jsonl
+else
+  printf 'SKIP  %-22s related  (no token harvested)\n' "related"
+  skip=$((skip + 1))
+fi
+
+# --- signed-API-only surfaces (need a logged-in cookie, SKIP anonymously) ---
 run suggest            -- suggest coffee
 run search-notes       -- search 'latte art' -n 3 -o jsonl
 run search-users       -- search coffee --users -n 2 -o jsonl
-run feed               -- feed --category food -n 3 -o jsonl
 run tag                -- tag coffee -o jsonl
-run user               -- user "$USER_ID" -o jsonl
-run user-notes         -- user "$USER_ID" --notes -n 3 -o jsonl
-
-# Harvest a real note + token from search so the note/comment calls have a token.
-PAIR="$("$XHS" search coffee -n 1 -o jsonl --fields note_id,xsec_token 2>/dev/null | head -1)"
-HNOTE="$(printf '%s' "$PAIR" | sed -n 's/.*"note_id":"\([^"]*\)".*/\1/p')"
-HTOKEN="$(printf '%s' "$PAIR" | sed -n 's/.*"xsec_token":"\([^"]*\)".*/\1/p')"
-HNOTE="${HNOTE:-$NOTE_ID}"
 if [ -n "$HTOKEN" ]; then
-  run note             -- note "$HNOTE" --token "$HTOKEN" -o jsonl
   run comments         -- comments "$HNOTE" --token "$HTOKEN" -n 3 -o jsonl
-  run related          -- related "$HNOTE" --token "$HTOKEN" -n 3 -o jsonl
 else
-  printf 'SKIP  %-22s (no token harvested, IP walled)\n' "note/comments/related"
-  skip=$((skip + 3))
+  printf 'SKIP  %-22s comments  (no token harvested)\n' "comments"
+  skip=$((skip + 1))
 fi
 
 # --- login-gated (needs XHS_COOKIE) ---

@@ -2,6 +2,7 @@ package xiaohongshu
 
 import (
 	"context"
+	"encoding/json"
 	"iter"
 	"time"
 
@@ -53,9 +54,82 @@ func FeedCategories() []string {
 	return out
 }
 
-// Feed streams the recommendation homefeed for a category. An unknown category
-// name falls back to the recommend channel. limit caps the items yielded.
+// ssrExploreState is the slice of __INITIAL_STATE__ that carries the explore
+// feed.
+type ssrExploreState struct {
+	Feed struct {
+		Feeds []ssrFeedItem `json:"feeds"`
+	} `json:"feed"`
+}
+
+// Feed streams the explore feed for a category. Without a cookie it reads the
+// server-rendered explore page, which the site reshuffles on every request, so
+// it refetches and de-duplicates until it has yielded limit unique notes. With a
+// logged-in cookie it follows the signed homefeed cursor instead. An unknown
+// category falls back to the recommend channel.
 func (c *Client) Feed(ctx context.Context, category string, limit int) iter.Seq2[FeedItem, error] {
+	if c.LoggedIn() {
+		return c.feedAPI(ctx, category, limit)
+	}
+	return func(yield func(FeedItem, error) bool) {
+		channel := feedCategories[category]
+		params := map[string]string{}
+		if channel != "" && channel != "homefeed_recommend" {
+			params["channel_id"] = channel
+		}
+		seen := map[string]bool{}
+		count, empties := 0, 0
+		for round := 0; round < feedRounds(limit); round++ {
+			st, err := c.getState(ctx, "/explore", params, true)
+			if err != nil {
+				if count > 0 {
+					return
+				}
+				yield(FeedItem{}, err)
+				return
+			}
+			var s ssrExploreState
+			fresh := 0
+			if json.Unmarshal(st, &s) == nil {
+				for _, it := range s.Feed.Feeds {
+					fi := c.feedItem(it)
+					if fi.NoteID == "" || seen[fi.NoteID] {
+						continue
+					}
+					seen[fi.NoteID] = true
+					fresh++
+					if !yield(fi, nil) {
+						return
+					}
+					count++
+					if limit > 0 && count >= limit {
+						return
+					}
+				}
+			}
+			if fresh == 0 {
+				empties++
+				if empties >= 3 {
+					return
+				}
+			} else {
+				empties = 0
+			}
+		}
+	}
+}
+
+// feedRounds bounds how many explore pages a discovery loop will fetch.
+func feedRounds(limit int) int {
+	if limit <= 0 {
+		return 25
+	}
+	return limit/10 + 5
+}
+
+// feedAPI streams the recommendation homefeed over the signed cursor API. It
+// needs a logged-in cookie.
+func (c *Client) feedAPI(ctx context.Context, category string, limit int) iter.Seq2[FeedItem, error] {
 	return func(yield func(FeedItem, error) bool) {
 		channel, ok := feedCategories[category]
 		if !ok {
@@ -139,8 +213,46 @@ type rawRelated struct {
 	} `json:"items"`
 }
 
-// Related returns notes recommended alongside a given note.
+// Related returns notes to read alongside a given note. With a logged-in cookie
+// it uses the signed recommendation endpoint. Anonymously it returns the note
+// author's other posts, read from the server-rendered profile, which is the
+// closest related set available without login.
 func (c *Client) Related(ctx context.Context, noteID, xsecToken string, limit int) ([]FeedItem, error) {
+	if c.LoggedIn() {
+		if items, err := c.relatedAPI(ctx, noteID, xsecToken, limit); err == nil && len(items) > 0 {
+			return items, nil
+		}
+	}
+	n, err := c.noteSSR(ctx, noteID, xsecToken)
+	if err != nil {
+		return nil, err
+	}
+	if n.UserID == "" {
+		return nil, nil
+	}
+	s, err := c.userState(ctx, n.UserID)
+	if err != nil {
+		return nil, err
+	}
+	var out []FeedItem
+	for _, grp := range s.User.Notes {
+		for _, it := range grp {
+			fi := c.feedItem(it)
+			if fi.NoteID == "" || fi.NoteID == noteID {
+				continue
+			}
+			out = append(out, fi)
+			if limit > 0 && len(out) >= limit {
+				return out, nil
+			}
+		}
+	}
+	return out, nil
+}
+
+// relatedAPI returns notes recommended alongside a given note over the signed
+// API.
+func (c *Client) relatedAPI(ctx context.Context, noteID, xsecToken string, limit int) ([]FeedItem, error) {
 	params := map[string]string{
 		"note_id":       noteID,
 		"xsec_token":    xsecToken,

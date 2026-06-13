@@ -19,19 +19,24 @@ nothing to sign up for and nothing to run alongside it.
   output formats and flags.
 - One **`cmd/xhs`** entry point ties them together.
 - The library also carries the parts specific to Xiaohongshu: a request signer
-  (`pkg/xhssign`), an anonymous web session bootstrap, and the id, url, and
-  xsec_token parser (`pkg/xhsurl`).
+  (`pkg/xhssign`), an anonymous web session bootstrap, a server-rendered page
+  reader (`pkg/xhshtml`), and the id, url, and xsec_token parser (`pkg/xhsurl`).
+
+## What works without a cookie
+
+`note` and `feed` work anonymously from any IP. `user`, `user --notes`, and
+`related` work on a fresh IP at a slow pace and want a cookie for heavy use.
+`comments`, `search`, `suggest`, `tag`, and `me` need a logged-in cookie. Pass
+one with `--cookie` or `XHS_COOKIE`.
 
 ## Scope
 
 xhs is a read-only client over data xiaohongshu already serves publicly. It reads
 that data and shapes it for you. That narrow scope keeps it a single small binary
-with no database, no daemon, and no setup.
-
-Xiaohongshu guards its web API: it blocks datacenter IPs and rate-limits hard, so
-run xhs from a residential connection at the default polite pace, and pass a
-cookie for the login-gated surfaces. See the [quick start](/getting-started/quick-start/)
-and [configuration](/reference/configuration/) for the details.
+with no database, no daemon, and no setup. The `crawl` command walks outward from
+the feed or seed notes and streams connected records to JSONL files. See the
+[commands](/reference/commands/) page for every command with sample input and
+output, and the [quick start](/getting-started/quick-start/) to get going.
 
 Next: [install it](/getting-started/installation/), then take the
 [quick start](/getting-started/quick-start/).

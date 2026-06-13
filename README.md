@@ -70,21 +70,34 @@ keeps and orders columns. `--template '{{.note_id}} {{.title}}'` renders each
 record with Go `text/template`. `-n` caps the record count. `--raw` prints each
 record as pretty JSON.
 
-## The anti-bot reality
+## How it reads data
 
-Xiaohongshu guards its web API. It blocks datacenter IP ranges (most cloud and CI
-hosts) within minutes and rate-limits every IP hard. From a residential
-connection the public surfaces above are reachable at a polite pace. From a
-server or a CI runner most calls come back as risk-control rejections, and the
-deeper, personalized surfaces always need a logged-in cookie.
+Xiaohongshu serves each page in two ways. The server renders the page once with
+the data already embedded in a `window.__INITIAL_STATE__` script, and the browser
+then keeps the page fresh over a signed JSON API. The signed API refuses
+anonymous callers with a login error, so `xhs` reads the server-rendered state
+first and only falls back to the signed API when you give it a logged-in cookie.
+
+What that means per surface, with no cookie:
+
+- **note** and **feed** read the server-rendered page and work anonymously from
+  any IP, including servers and CI. These are the reliable surfaces.
+- **user**, **user --notes**, and **related** also read the server-rendered
+  profile page. Xiaohongshu rate-limits that page hard per IP: a cold IP serves
+  it, then it redirects to login for a cooldown window. They work on a fresh IP
+  and at a slow pace, and need a cookie for sustained crawling.
+- **comments**, **search**, **suggest**, **tag**, and **me** are only ever loaded
+  over the signed JSON API, so they need a logged-in cookie.
 
 So:
 
-- Run it from a residential IP, slowly. The default `--rate` is 600ms.
-- Opening a note needs an `xsec_token`. You get one from a listing, a search
-  result, or a share URL; it travels with the note and `xhs id` pulls it out.
-- For login-gated surfaces (the personalized homefeed, a user's liked or
-  collected notes, the `me` login check), pass a real cookie:
+- Opening a note needs an `xsec_token`. You get one from the feed, a listing, a
+  search result, or a share URL; it travels with the note and `xhs id` pulls it
+  out. The `feed` command is the easiest anonymous source of notes and tokens.
+- Run it at a polite pace. The default `--rate` is 600ms; raise it with
+  `--rate 2s` when you walk many profiles.
+- For the signed surfaces, or to crawl profiles without hitting the wall, pass a
+  real cookie:
 
 ```bash
 xhs me --cookie 'web_session=...; a1=...'
@@ -94,6 +107,29 @@ export XHS_COOKIE='web_session=...; a1=...'
 The anonymous session (the `a1` cookie) is bootstrapped on first use and cached
 under your config dir. Inspect or reset it with `xhs session show` and
 `xhs session forget`.
+
+## Crawling
+
+`xhs crawl` is the scraping engine. It seeds a frontier from the explore feed and
+from any note ids you pass, then walks outward breadth-first: each note reaches
+its author, the author's other notes, and its related notes. Every record kind
+streams to its own JSONL file (`notes.jsonl`, `users.jsonl`, `comments.jsonl`) as
+it is found, so a long crawl leaves usable output even if it stops early. Notes
+and users are de-duplicated, and `--depth` and `--max` bound the walk.
+
+```bash
+# seed from the explore feed and walk two hops, capped at 500 notes
+xhs crawl --explore --depth 2 --max 500 --out ./data
+
+# crawl a category, following each author's other notes
+xhs crawl --category food --author-notes --out ./food
+
+# crawl specific notes with their comments and related notes
+xhs crawl <note-id> --token <t> --related --comments --out ./data
+
+# pipe ids in from another command
+xhs search coffee -o url | xhs crawl - --out ./data
+```
 
 ## Configuration
 
@@ -123,6 +159,7 @@ cli/           the cobra command tree and the output formatter
 xiaohongshu/   the library: signed HTTP client, session, and data models
 pkg/xhssign/   the request signer (x-s/x-t/x-s-common)
 pkg/xhsurl/    the id, url, and xsec_token parser
+pkg/xhshtml/   the __INITIAL_STATE__ extractor for server-rendered pages
 docs/          tago documentation site
 ```
 

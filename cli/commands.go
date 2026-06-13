@@ -84,15 +84,20 @@ func newNoteCmd(a *App) *cobra.Command {
 		RunE: func(_ *cobra.Command, args []string) error {
 			c := a.Client()
 			var notes []xiaohongshu.Note
+			var lastErr error
 			for _, raw := range readArgsOrStdin(args) {
 				ref := xhsurl.Parse(raw)
 				tok := firstNonEmpty(token, ref.XsecToken)
 				n, err := c.Note(a.ctx(), ref.NoteID, tok)
 				if err != nil {
 					a.progress("skip %s: %v", ref.NoteID, err)
+					lastErr = err
 					continue
 				}
 				notes = append(notes, n)
+			}
+			if len(notes) == 0 && lastErr != nil {
+				return lastErr
 			}
 			return emitAll(a, notes)
 		},
@@ -122,14 +127,19 @@ func newUserCmd(a *App) *cobra.Command {
 				return nil
 			}
 			var users []xiaohongshu.User
+			var lastErr error
 			for _, raw := range readArgsOrStdin(args) {
 				ref := xhsurl.ParseUser(raw)
 				u, err := c.User(a.ctx(), ref.UserID)
 				if err != nil {
 					a.progress("skip %s: %v", ref.UserID, err)
+					lastErr = err
 					continue
 				}
 				users = append(users, u)
+			}
+			if len(users) == 0 && lastErr != nil {
+				return lastErr
 			}
 			return emitAll(a, users)
 		},

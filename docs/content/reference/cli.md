@@ -25,10 +25,30 @@ Run `xhs <command> --help` for the full flag list on any command.
 | `me` | Show the login state of the configured cookie. |
 | `id <input>...` | Parse ids, urls, and xsec_tokens out of any xiaohongshu link. |
 | `session show\|forget` | Inspect or reset the persisted anonymous web session. |
-| `crawl <id\|url>...` | Crawl connected records from seed notes into JSONL files. |
+| `crawl [id\|url]...` | Crawl connected records into JSONL files, seeding from `--explore`/`--category` or seed notes. |
 | `config show\|path` | Show resolved configuration and paths. |
 | `cache stat\|clear\|path` | Manage the on-disk response cache. |
 | `version` | Print the version and exit. |
+
+## Crawl flags
+
+`crawl` walks a frontier of notes breadth-first and streams `notes.jsonl`,
+`users.jsonl`, and `comments.jsonl` into `--out` as records are found.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--out` | `.` | output directory for the JSONL files |
+| `--explore` | `false` | seed the frontier from the explore feed |
+| `--category` | | seed from a named explore category (implies `--explore`) |
+| `--seed-limit` | `30` | how many explore notes to seed with |
+| `--depth` | `1` | how many hops to follow related and author notes |
+| `--max` | `0` | stop after this many notes (0 means no cap) |
+| `--related` | `true` | follow related notes into the frontier |
+| `--author-notes` | `false` | follow each author's other notes into the frontier |
+| `--user` | `true` | also crawl the note author profile |
+| `--comments` | `false` | also crawl comments |
+| `--deep` | `false` | include comment replies when crawling comments |
+| `--token` | | xsec_token shared by the seed notes |
 
 ## Global flags
 
