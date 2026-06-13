@@ -11,5 +11,6 @@ packages (deb, rpm, apk), a multi-arch container image on GHCR, and entries for
 the package managers. Binaries are pure Go, so there is nothing to install
 alongside them.
 
-No releases yet. Cut the first one with `git tag v0.1.0 && git push --tags`,
-then add a page here.
+- [v0.1.0](/release-notes/v0-1-0/) is the first release: notes, users, comments,
+  search, the homefeed, related notes, topics, and crawl, with the request
+  signer and anonymous session reimplemented from scratch.

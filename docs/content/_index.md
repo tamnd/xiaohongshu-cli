@@ -7,16 +7,19 @@ heroPrimaryURL: "/getting-started/quick-start/"
 heroPrimaryText: "Get started"
 ---
 
-A command line for Xiaohongshu.
+A command line for Xiaohongshu. It reads public data from xiaohongshu.com,
+shapes it into clean records, and pipes into the rest of your tools.
 
 ```bash
-xhs --help            # the command tree
-xhs version           # build info
+xhs search 'latte art' -n 5
+xhs search 'latte art' -o url | xhs note -
+xhs user <id> --notes -n 50
+xhs feed --category food -n 40
 ```
 
-This site is a starting point. As you add commands, document each one under
-[guides](/guides/) and keep the [CLI reference](/reference/cli/) in step with
-the real flag set.
+It signs its own requests and bootstraps an anonymous web session. The deep
+surfaces need a logged-in cookie and a residential IP; the [quick start](/getting-started/quick-start/)
+covers what is reachable without one.
 
 ## Where to go next
 
