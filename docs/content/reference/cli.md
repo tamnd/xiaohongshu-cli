@@ -76,11 +76,31 @@ These apply to every command.
 
 ## Exit codes
 
-| Code | Meaning |
-|---|---|
-| `0` | success |
-| `3` | the surface needs a login cookie |
-| `4` | not found |
-| `5` | rate-limited or walled by anti-bot |
-| `6` | network error |
-| `1` | any other error |
+One code per response state, so a script can act on a refusal without parsing
+English out of stderr.
+
+| Code | State | Meaning | What to do |
+|---|---|---|---|
+| `0` | ok | it worked | |
+| `1` | error | the response was classified as nothing | file a bug, and include the endpoint from the message |
+| `2` | antibot | the request signature was refused | nothing a cookie fixes, run `xhs verify --live` |
+| `3` | empty | the surface answered and had nothing | treat as an empty result, not a failure |
+| `4` | login | this surface needs a logged-in cookie | pass one with `--cookie` or set `XHS_COOKIE` |
+| `5` | network | transport, DNS or timeout | retry |
+| `6` | walled | this address is over budget | wait several minutes, and slow down with `--rate 2s` |
+| `7` | notfound | the object does not exist | |
+| `8` | token | the note needs an `xsec_token` you do not hold | get the note from `xhs feed` or `xhs search`, or paste the full share URL |
+| `9` | gone | the endpoint was removed by Xiaohongshu | nothing, and asking again will not bring it back |
+
+Codes `2`, `3`, `5`, `6` and `7` mean the same thing in
+[bilibili-cli](https://github.com/tamnd/bilibili-cli), so one wrapper script can
+drive both tools.
+
+`xhs me` is the exception that proves the rule. It exits `0` with
+`logged_in: false` when there is no cookie, because "you are not logged in" is
+the answer to what it was asked rather than a refusal to answer.
+
+**Changed in v0.3.0.** v0.2.0 published five codes. `3` meant "needs a login
+cookie" and is now `4`, `4` meant "not found" and is now `7`, and `5` covered
+both rate limiting and anti-bot, which are opposite instructions, and is now `6`
+and `2`.

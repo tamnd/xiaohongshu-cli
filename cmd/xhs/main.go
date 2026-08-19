@@ -25,24 +25,35 @@ func main() {
 	}
 }
 
-// exitCode maps an error to a stable shell exit code so scripts can tell a not
-// found from an anti-bot wall from a transient network failure.
+// exitCodes maps each response state to a shell exit code. One state, one
+// number, so a script can act on a refusal without parsing English.
 //
-// The client now sorts responses into ten states, but this table still collapses
-// them onto the five numbers v0.2.0 published, so upgrading does not silently
-// change what a script sees. The widened table lands with the exit code work and
-// gets its own release note.
+// v0.2.0 published five numbers and collapsed states that call for opposite
+// responses onto the same one. Rate limiting and an anti-bot refusal both exited
+// 5, which is "sleep and try again" and "stop, nothing you do here will work"
+// wearing the same number. A note missing its xsec_token exited 3, which told
+// the caller to find a cookie for a problem no cookie solves.
+//
+// The numbers 2, 3, 5, 6 and 7 mean the same thing here as in bilibili-cli, so
+// one wrapper script can drive both tools.
+var exitCodes = map[xiaohongshu.Status]int{
+	xiaohongshu.StatusOK:       0,
+	xiaohongshu.StatusError:    1,
+	xiaohongshu.StatusAntibot:  2,
+	xiaohongshu.StatusEmpty:    3,
+	xiaohongshu.StatusLogin:    4,
+	xiaohongshu.StatusNetwork:  5,
+	xiaohongshu.StatusWalled:   6,
+	xiaohongshu.StatusNotFound: 7,
+	xiaohongshu.StatusToken:    8,
+	xiaohongshu.StatusGone:     9,
+}
+
+// exitCode maps an error to its state's exit code. A state with no entry exits
+// 1, because an unclassified refusal is a bug report and not a category.
 func exitCode(err error) int {
-	switch xiaohongshu.StatusOf(err) {
-	case xiaohongshu.StatusNotFound, xiaohongshu.StatusGone:
-		return 4
-	case xiaohongshu.StatusLogin, xiaohongshu.StatusToken:
-		return 3
-	case xiaohongshu.StatusWalled, xiaohongshu.StatusAntibot:
-		return 5
-	case xiaohongshu.StatusNetwork:
-		return 6
-	default:
-		return 1
+	if code, ok := exitCodes[xiaohongshu.StatusOf(err)]; ok {
+		return code
 	}
+	return 1
 }
