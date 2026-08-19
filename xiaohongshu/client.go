@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -58,7 +59,7 @@ func NewClient(cfg Config) *Client {
 		hc: &http.Client{
 			Timeout:       cfg.Timeout,
 			Transport:     tr,
-			CheckRedirect: stopAtLogin,
+			CheckRedirect: stopAtRefusal,
 		},
 		signer:  xhssign.New(),
 		nowFn:   time.Now,
@@ -69,23 +70,6 @@ func NewClient(cfg Config) *Client {
 	}
 	c.applyCookies()
 	return c
-}
-
-// errLoginWall marks a redirect to the login page, which XHS issues when a
-// server-rendered surface needs a cookie or when the caller's IP is being
-// rate-limited. webAttempt turns it into a typed access error.
-const errLoginWall = "redirected to login"
-
-// stopAtLogin stops the HTTP client from following a redirect to the login page
-// so the caller sees the wall instead of a rendered login form with no data.
-func stopAtLogin(req *http.Request, _ []*http.Request) error {
-	if strings.Contains(req.URL.Path, "/login") {
-		return fmt.Errorf("%s: %s", errLoginWall, req.URL)
-	}
-	if len(req.URL.RawQuery) > 0 && strings.Contains(req.URL.RawQuery, "redirectPath") {
-		return fmt.Errorf("%s: %s", errLoginWall, req.URL)
-	}
-	return nil
 }
 
 func (c *Client) now() time.Time { return c.nowFn() }
@@ -109,6 +93,34 @@ func (c *Client) applyCookies() {
 		}
 		c.setCookie(strings.TrimSpace(kv[0]), strings.TrimSpace(kv[1]))
 	}
+}
+
+// captureCookies keeps every cookie either host hands out. The web host issues
+// acw_tc, the Aliyun WAF token, with a thirty minute lifetime, and abRequestId
+// alongside it. The previous version discarded both, so every request in a
+// session arrived without the tokens a browser would be carrying by then.
+func (c *Client) captureCookies(resp *http.Response) {
+	for _, ck := range resp.Cookies() {
+		if ck.Name == "" || ck.Value == "" {
+			continue
+		}
+		c.setCookie(ck.Name, ck.Value)
+	}
+}
+
+// refusalError turns a stopped redirect into the typed error the caller sees.
+//
+// A redirect to /login is ambiguous by construction: the site serves it both to
+// a surface that wants a credential and to an address that has spent its
+// budget, and nothing in the response tells the two apart. Resolving that costs
+// one extra request against a page known to need no credential, which is what
+// probeWeb does.
+func (c *Client) refusalError(ctx context.Context, ref *refusal, endpoint string) error {
+	st := classifyRefusal(ref)
+	if st == StatusToken {
+		return statusError(st, ref.errorCode(), ref.errorMessage(), endpoint)
+	}
+	return statusError(st, 0, "", endpoint)
 }
 
 func (c *Client) setCookie(name, value string) {
@@ -233,7 +245,7 @@ func (c *Client) do(ctx context.Context, method, uri string, params map[string]s
 		_, _ = fmt.Fprintf(dryRunOut, "%s %s%s\n", method, full, q)
 		return dryRunBody, nil
 	}
-	return c.runWithRetry(ctx, cacheKey, true, func(ctx context.Context) ([]byte, error) {
+	return c.runWithRetry(ctx, cacheKey, true, func(ctx context.Context) (result, error) {
 		return c.attempt(ctx, method, full, uri, params, body)
 	})
 }
@@ -241,13 +253,14 @@ func (c *Client) do(ctx context.Context, method, uri string, params map[string]s
 // runWithRetry runs attempt with the client's pacing and retry policy, reading
 // and writing the on-disk cache under cacheKey when useCache is set. It backs
 // off between tries and gives up after Retries attempts.
-func (c *Client) runWithRetry(ctx context.Context, cacheKey string, useCache bool, attempt func(context.Context) ([]byte, error)) ([]byte, error) {
+func (c *Client) runWithRetry(ctx context.Context, cacheKey string, useCache bool, attempt func(context.Context) (result, error)) ([]byte, error) {
 	if c.cache != nil && useCache {
 		if b, ok := c.cache.get(cacheKey); ok {
 			return b, nil
 		}
 	}
 	var last error
+	tries := 0
 	for try := 0; try <= c.cfg.Retries; try++ {
 		if try > 0 {
 			d := c.cfg.Rate * time.Duration(try*try+1)
@@ -260,27 +273,44 @@ func (c *Client) runWithRetry(ctx context.Context, cacheKey string, useCache boo
 		if err := c.throttle(ctx); err != nil {
 			return nil, err
 		}
-		b, err := attempt(ctx)
+		tries = try + 1
+		res, err := attempt(ctx)
 		if err != nil {
-			// A typed API error is already classified (login wall, anti-bot,
-			// not found). Retrying it inside this short paced loop will not
-			// clear it, and wrapping it would lose its exit-code kind, so
-			// return it untouched.
-			if ae, ok := err.(*APIError); ok {
-				return nil, ae
+			// Retry only what a second request could plausibly answer
+			// differently. A 404 is the routing table, a 302 to /login is the
+			// caller's budget, and a 406 is the signature: none of the three is
+			// different two seconds later, and retrying the second one is how a
+			// rate-limited address stays rate-limited.
+			if !StatusOf(err).Retryable() {
+				return nil, err
 			}
 			last = err
 			continue
 		}
-		if c.cache != nil && useCache {
-			c.cache.put(cacheKey, b)
+		// A refusal is never cached. It describes the caller's standing at a
+		// moment rather than the object they asked for, and keeping one
+		// poisons every later run from the same directory.
+		if c.cache != nil && useCache && res.status.Cacheable() {
+			c.cache.put(cacheKey, res.body)
 		}
-		return b, nil
+		return res.body, nil
 	}
-	return nil, &APIError{Message: last.Error(), Hint: "request failed after retries", Kind: ErrNetwork}
+	return nil, &APIError{
+		Message: last.Error(),
+		Hint:    fmt.Sprintf("gave up after %d attempts", tries),
+		Status:  StatusNetwork,
+	}
 }
 
-func (c *Client) attempt(ctx context.Context, method, full, uri string, params map[string]string, body string) ([]byte, error) {
+// result is one completed attempt: the body and the state it was sorted into.
+// The status travels with the body so the cache can refuse to keep a refusal
+// without re-deriving what the response was.
+type result struct {
+	body   []byte
+	status Status
+}
+
+func (c *Client) attempt(ctx context.Context, method, full, uri string, params map[string]string, body string) (result, error) {
 	var reqBody io.Reader
 	if method == http.MethodPost {
 		reqBody = bytes.NewReader([]byte(body))
@@ -291,7 +321,7 @@ func (c *Client) attempt(ctx context.Context, method, full, uri string, params m
 	}
 	req, err := http.NewRequestWithContext(ctx, method, target, reqBody)
 	if err != nil {
-		return nil, err
+		return result{}, err
 	}
 	headers := c.signer.Sign(xhssign.Request{
 		Method:  method,
@@ -317,23 +347,53 @@ func (c *Client) attempt(ctx context.Context, method, full, uri string, params m
 	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
-		return nil, err
+		var ref *refusal
+		if errors.As(err, &ref) {
+			return result{}, c.refusalError(ctx, ref, uri)
+		}
+		return result{}, err
 	}
 	defer func() { _ = resp.Body.Close() }()
+	c.captureCookies(resp)
+	// A 429 and a 5xx are a server saying it is busy, which is the only thing
+	// worth asking again about, so they leave as plain errors for the retry
+	// loop rather than as classified refusals.
 	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
-		return nil, fmt.Errorf("HTTP %d from %s", resp.StatusCode, uri)
+		return result{}, fmt.Errorf("HTTP %d from %s", resp.StatusCode, uri)
 	}
 	out, err := readBody(resp)
 	if err != nil {
-		return nil, err
+		return result{}, err
 	}
-	if resp.StatusCode == 406 || resp.StatusCode == 461 {
-		return nil, apiError(resp.StatusCode, "anti-bot rejection")
+	switch st := classifyAPI(resp.StatusCode, out); st {
+	case StatusOK, StatusEmpty:
+		return result{body: out, status: st}, nil
+	case StatusError:
+		return result{}, statusError(st, resp.StatusCode, oneLine(out), uri)
+	default:
+		var env envelope
+		_ = json.Unmarshal(out, &env)
+		return result{}, statusError(st, envCode(env, resp.StatusCode), env.Msg, uri)
 	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("HTTP %d from %s", resp.StatusCode, uri)
+}
+
+// envCode prefers the envelope's own code and falls back to the HTTP status,
+// which is what a gateway refusal leaves behind when there is no envelope.
+func envCode(env envelope, httpStatus int) int {
+	if env.Code != 0 {
+		return env.Code
 	}
-	return out, nil
+	return httpStatus
+}
+
+// oneLine trims a body down to something printable in an error message.
+func oneLine(b []byte) string {
+	s := strings.TrimSpace(string(b))
+	s = strings.ReplaceAll(s, "\n", " ")
+	if len(s) > 120 {
+		s = s[:120]
+	}
+	return s
 }
 
 func readBody(resp *http.Response) ([]byte, error) {

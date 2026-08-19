@@ -16,6 +16,11 @@ var marker = []byte("window.__INITIAL_STATE__")
 // practice this means the request was redirected to a login or block page.
 var ErrNotFound = errors.New("xhshtml: __INITIAL_STATE__ not found")
 
+// Has reports whether a page carries a __INITIAL_STATE__ marker at all. It is
+// the cheap half of State, for a caller that only needs to know whether the
+// page rendered or came back as a shell.
+func Has(html []byte) bool { return bytes.Contains(html, marker) }
+
 // State returns the window.__INITIAL_STATE__ object embedded in an Xiaohongshu
 // page as valid JSON. The site assigns the object with bare `undefined` and
 // `NaN` tokens that are not valid JSON, so those are rewritten to null outside

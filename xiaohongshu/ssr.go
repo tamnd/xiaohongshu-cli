@@ -3,6 +3,7 @@ package xiaohongshu
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -31,7 +32,10 @@ func (c *Client) getState(ctx context.Context, path string, params map[string]st
 	}
 	st, err := xhshtml.State(html)
 	if err != nil {
-		return nil, apiError(-101, "no anonymous data on this page (the token expired, or this surface needs a logged-in cookie)")
+		// The page rendered as a shell. That is an empty answer, not a
+		// refusal: a refusal on this host arrives as a redirect and is
+		// classified before the body is ever read.
+		return nil, statusError(StatusEmpty, 0, "", path)
 	}
 	return st, nil
 }
@@ -49,15 +53,15 @@ func (c *Client) doWeb(ctx context.Context, path string, params map[string]strin
 		return []byte(dryRunHTML), nil
 	}
 	cacheKey := "WEB " + full + q
-	return c.runWithRetry(ctx, cacheKey, !fresh, func(ctx context.Context) ([]byte, error) {
+	return c.runWithRetry(ctx, cacheKey, !fresh, func(ctx context.Context) (result, error) {
 		return c.webAttempt(ctx, full+q, path)
 	})
 }
 
-func (c *Client) webAttempt(ctx context.Context, target, path string) ([]byte, error) {
+func (c *Client) webAttempt(ctx context.Context, target, path string) (result, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
-		return nil, err
+		return result{}, err
 	}
 	req.Header.Set("User-Agent", c.cfg.UserAgent)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
@@ -71,21 +75,31 @@ func (c *Client) webAttempt(ctx context.Context, target, path string) ([]byte, e
 	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
-		// A redirect to the login page surfaces as a CheckRedirect stop below;
-		// treat it as a rate or login wall rather than a transport error.
-		if strings.Contains(err.Error(), errLoginWall) {
-			return nil, apiError(-101, "redirected to login (rate-limited or this surface needs a logged-in cookie)")
+		// A refusal arrives as a CheckRedirect stop wrapped in a *url.Error.
+		// The URL is the whole point: the token refusal puts error_code and
+		// error_msg in its query string, and stringifying the error loses them.
+		var ref *refusal
+		if errors.As(err, &ref) {
+			return result{}, c.refusalError(ctx, ref, path)
 		}
-		return nil, err
+		return result{}, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	// XHS serves some surfaces with a 404 status but a fully rendered body, so
-	// the presence of a state object matters more than the code. Only retry on
-	// throttling and server faults.
+	c.captureCookies(resp)
 	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
-		return nil, fmt.Errorf("HTTP %d from %s", resp.StatusCode, path)
+		return result{}, fmt.Errorf("HTTP %d from %s", resp.StatusCode, path)
 	}
-	return readBody(resp)
+	body, err := readBody(resp)
+	if err != nil {
+		return result{}, err
+	}
+	// XHS serves some surfaces with a 404 status but a fully rendered body, so
+	// the presence of a state object matters more than the code does.
+	st := classifyWeb(resp.StatusCode, xhshtml.Has(body))
+	if st != StatusOK && st != StatusEmpty {
+		return result{}, statusError(st, resp.StatusCode, "", path)
+	}
+	return result{body: body, status: st}, nil
 }
 
 // ---- shared server-rendered shapes (camelCase, unlike the snake_case API) ----
