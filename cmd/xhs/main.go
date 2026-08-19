@@ -27,15 +27,20 @@ func main() {
 
 // exitCode maps an error to a stable shell exit code so scripts can tell a not
 // found from an anti-bot wall from a transient network failure.
+//
+// The client now sorts responses into ten states, but this table still collapses
+// them onto the five numbers v0.2.0 published, so upgrading does not silently
+// change what a script sees. The widened table lands with the exit code work and
+// gets its own release note.
 func exitCode(err error) int {
-	switch xiaohongshu.Kind(err) {
-	case xiaohongshu.ErrNotFound:
+	switch xiaohongshu.StatusOf(err) {
+	case xiaohongshu.StatusNotFound, xiaohongshu.StatusGone:
 		return 4
-	case xiaohongshu.ErrAccess:
+	case xiaohongshu.StatusLogin, xiaohongshu.StatusToken:
 		return 3
-	case xiaohongshu.ErrRate, xiaohongshu.ErrAntibot:
+	case xiaohongshu.StatusWalled, xiaohongshu.StatusAntibot:
 		return 5
-	case xiaohongshu.ErrNetwork:
+	case xiaohongshu.StatusNetwork:
 		return 6
 	default:
 		return 1
