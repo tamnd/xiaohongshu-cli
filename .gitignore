@@ -1,5 +1,8 @@
 /dist/
 /bin/
+# A stray root build: `make` puts the binary in bin/, but `go build` at the
+# root drops a 5MB Mach-O here that `git add -A` will happily stage.
+/xhs
 *.out
 *.test
 .DS_Store
