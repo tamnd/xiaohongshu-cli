@@ -148,8 +148,10 @@ Flags win over environment variables, which win over defaults.
 `xhs config show` prints the resolved settings with the cookie redacted.
 `xhs cache stat|clear|path` manages the on-disk response cache.
 
-Exit codes: `0` success, `3` needs a login, `4` not found, `5` rate-limited or
-walled by anti-bot, `6` network error, `1` anything else.
+Exit codes, one per response state: `0` ok, `1` unclassified, `2` anti-bot,
+`3` empty, `4` needs a login cookie, `5` network, `6` walled by rate limiting,
+`7` not found, `8` no usable `xsec_token`, `9` the endpoint is gone. Codes `2`,
+`3`, `5`, `6` and `7` match [bilibili-cli](https://github.com/tamnd/bilibili-cli).
 
 ## Development
 

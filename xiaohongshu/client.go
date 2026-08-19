@@ -77,6 +77,14 @@ func (c *Client) now() time.Time { return c.nowFn() }
 // SetNow overrides the clock (testing).
 func (c *Client) SetNow(f func() time.Time) { c.nowFn = f }
 
+// SetTransport replaces the HTTP transport (testing).
+//
+// This is how the tests drive the client end to end. An httptest server would
+// be the obvious choice and cannot be used: it binds a socket, and every test
+// binary in this repository has to pass with the network denied. A round
+// tripper answers in process and needs no socket at all.
+func (c *Client) SetTransport(rt http.RoundTripper) { c.hc.Transport = rt }
+
 // applyCookies parses the configured cookie header into the per-request map.
 func (c *Client) applyCookies() {
 	if c.cfg.Cookie == "" {
